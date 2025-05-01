@@ -1,0 +1,506 @@
+import { ethers } from 'ethers';
+import { getContractAddress, CONTRACT_ABIS } from './contractConfig';
+import { getNetworkByChainId } from './networks';
+
+// Define the window.ethereum type
+declare global {
+  interface Window {
+    ethereum?: any;
+  }
+}
+
+// Sepolia Chain ID in hex
+const SEPOLIA_CHAIN_ID = '0xaa36a7'; // Chain ID in hex for Sepolia
+
+/**
+ * Connects to MetaMask wallet
+ * @returns Wallet address
+ */
+export async function connectMetaMask(): Promise<string> {
+  if (!window.ethereum) {
+    throw new Error('MetaMask is not installed. Please install MetaMask to continue.');
+  }
+
+  try {
+    // Check if we're on Sepolia and switch networks if needed
+    await switchToSepoliaNetwork();
+
+    // Request account access
+    const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+    
+    if (accounts.length === 0) {
+      throw new Error('No accounts found. Please check your MetaMask configuration.');
+    }
+
+    // We're only interested in the first account for now
+    const address = accounts[0];
+    return address;
+  } catch (error: any) {
+    if (error.code === 4001) {
+      // User rejected the request
+      throw new Error('Please connect to MetaMask to use this feature.');
+    } else {
+      throw new Error(`Failed to connect to MetaMask: ${error.message}`);
+    }
+  }
+}
+
+/**
+ * Switches to the specified network
+ * @param networkKey The key of the network in SUPPORTED_NETWORKS to switch to
+ */
+export async function switchToNetwork(networkKey: string): Promise<void> {
+  if (!window.ethereum) return;
+  
+  // Import from networks.ts to avoid circular dependency
+  const { switchNetwork } = await import('../components/wallet/NetworkSelector');
+  
+  try {
+    const success = await switchNetwork(networkKey);
+    if (!success) {
+      throw new Error(`Failed to switch to ${networkKey} network`);
+    }
+  } catch (error: any) {
+    console.error(`Error switching to ${networkKey} network:`, error);
+    throw new Error(`Failed to switch to ${networkKey} network: ${error.message}`);
+  }
+}
+
+/**
+ * Switches the MetaMask network to Sepolia Testnet (legacy method)
+ * @deprecated Use switchToNetwork('sepolia') instead
+ */
+export async function switchToSepoliaNetwork(): Promise<void> {
+  return switchToNetwork('sepolia');
+}
+
+/**
+ * Shortens an Ethereum address for display
+ * @param address The full Ethereum address
+ * @returns Shortened address
+ */
+export function shortenAddress(address: string): string {
+  if (!address) return '';
+  return `${address.slice(0, 6)}...${address.slice(-4)}`;
+}
+
+/**
+ * Gets the Ethers provider for the current browser wallet
+ * @returns Ethers BrowserProvider instance or null
+ */
+export function getEthersProvider(): ethers.BrowserProvider | null {
+  if (!window.ethereum) {
+    return null;
+  }
+  
+  return new ethers.BrowserProvider(window.ethereum);
+}
+
+/**
+ * Gets the DomainRegistry contract instance
+ * @returns Contract instance
+ */
+export async function getDomainRegistryContract(): Promise<ethers.Contract> {
+  const provider = getEthersProvider();
+  if (!provider) {
+    throw new Error('Ethereum provider not available');
+  }
+  
+  // Get the current chain ID and map to our network key
+  const { chainId } = await provider.getNetwork();
+  const chainIdHex = '0x' + chainId.toString(16);
+  const networkKey = getNetworkByChainId(chainIdHex) || 'sepolia'; // Default to Sepolia
+  
+  // Get the contract address for the current network
+  const contractAddress = getContractAddress(networkKey);
+  
+  // If no contract is deployed on this network, throw an error
+  if (!contractAddress) {
+    throw new Error(`No contract deployed on network: ${networkKey}`);
+  }
+  
+  const signer = await provider.getSigner();
+  return new ethers.Contract(contractAddress, CONTRACT_ABIS.DomainRegistry, signer);
+}
+
+/**
+ * Gets the current block number
+ * @returns Current block number
+ */
+export async function getBlockNumber(): Promise<number> {
+  const provider = getEthersProvider();
+  if (!provider) {
+    throw new Error('Ethereum provider not available');
+  }
+  
+  return await provider.getBlockNumber();
+}
+
+/**
+ * Checks if a domain is available
+ * @param name Domain name without TLD
+ * @param tld TLD (e.g., "eth", "com")
+ * @returns True if domain is available
+ */
+export async function checkDomainAvailability(name: string, tld: string): Promise<boolean> {
+  try {
+    // Get the current network's key
+    const provider = getEthersProvider();
+    if (!provider) {
+      // If no provider, use mock behavior
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const unavailableList = ['test', 'admin', 'blockchain', 'web3', 'crypto'];
+      return !unavailableList.includes(name.toLowerCase());
+    }
+
+    const { chainId } = await provider.getNetwork();
+    const chainIdHex = '0x' + chainId.toString(16);
+    const networkKey = getNetworkByChainId(chainIdHex) || 'sepolia';
+    
+    // Check if contract is deployed on this network
+    const contractAddress = getContractAddress(networkKey);
+    if (!contractAddress) {
+      // No contract on this network, use mock behavior
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const unavailableList = ['test', 'admin', 'blockchain', 'web3', 'crypto'];
+      return !unavailableList.includes(name.toLowerCase());
+    }
+    
+    // Use contract to check availability
+    const contract = await getDomainRegistryContract();
+    return await contract.isDomainAvailable(name, tld);
+  } catch (error) {
+    console.error('Error checking domain availability:', error);
+    // Default to available in case of errors for better UX
+    return true;
+  }
+}
+
+/**
+ * Calculates the registration fee for a domain
+ * @param name Domain name without TLD
+ * @param tld TLD (e.g., "eth", "com")
+ * @param years Registration period in years
+ * @returns Registration fee in ETH as a string
+ */
+export async function calculateRegistrationFee(
+  name: string, 
+  tld: string, 
+  years: number
+): Promise<string> {
+  try {
+    // Get the current network's key
+    const provider = getEthersProvider();
+    if (!provider) {
+      // If no provider, use mock behavior
+      // Basic price logic for mocked fee calculation
+      const baseFee = 0.01; // ETH
+      const tldMultipliers: {[key: string]: number} = {
+        'eth': 1.0,
+        'com': 2.0,
+        'org': 1.6,
+        'io': 1.8,
+        'app': 1.5,
+        'tech': 1.2
+      };
+      const lengthMultiplier = name.length <= 4 ? 5 - name.length : 1;
+      
+      const tldMultiplier = tldMultipliers[tld] || 1.0;
+      const yearDiscount = years > 1 ? Math.min(years * 0.05, 0.45) : 0;
+      
+      const price = baseFee * lengthMultiplier * tldMultiplier * years * (1 - yearDiscount);
+      
+      return price.toFixed(4);
+    }
+
+    const { chainId } = await provider.getNetwork();
+    const chainIdHex = '0x' + chainId.toString(16);
+    const networkKey = getNetworkByChainId(chainIdHex) || 'sepolia';
+    
+    // Check if contract is deployed on this network
+    const contractAddress = getContractAddress(networkKey);
+    if (!contractAddress) {
+      // No contract on this network, use mock behavior
+      const baseFee = 0.01; // ETH
+      const tldMultipliers: {[key: string]: number} = {
+        'eth': 1.0,
+        'com': 2.0,
+        'org': 1.6,
+        'io': 1.8,
+        'app': 1.5,
+        'tech': 1.2
+      };
+      const lengthMultiplier = name.length <= 4 ? 5 - name.length : 1;
+      
+      const tldMultiplier = tldMultipliers[tld] || 1.0;
+      const yearDiscount = years > 1 ? Math.min(years * 0.05, 0.45) : 0;
+      
+      const price = baseFee * lengthMultiplier * tldMultiplier * years * (1 - yearDiscount);
+      
+      return price.toFixed(4);
+    }
+    
+    const contract = await getDomainRegistryContract();
+    const fee = await contract.calculateRegistrationFee(name, tld, years);
+    
+    // Convert fee from wei to ETH
+    return ethers.formatEther(fee);
+  } catch (error) {
+    console.error('Error calculating registration fee:', error);
+    // Return a default price to prevent UI errors
+    return '0.05';
+  }
+}
+
+/**
+ * Registers a domain on the blockchain
+ * @param name Domain name without TLD
+ * @param tld TLD (e.g., "eth", "com")
+ * @param years Registration period in years
+ * @returns Transaction details including hash and token ID
+ */
+export async function registerDomainTransaction(
+  name: string, 
+  tld: string,
+  years: number
+): Promise<{ transactionHash: string; tokenId: number }> {
+  try {
+    // Get the current network's key
+    const provider = getEthersProvider();
+    if (!provider) {
+      // If no provider, use mock behavior
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Generate a random transaction hash
+      const transactionHash = '0x' + Array.from({ length: 64 }, () => 
+        Math.floor(Math.random() * 16).toString(16)
+      ).join('');
+      
+      // Generate a random token ID
+      const tokenId = Math.floor(1000 + Math.random() * 9000);
+      
+      return {
+        transactionHash,
+        tokenId
+      };
+    }
+
+    const { chainId } = await provider.getNetwork();
+    const chainIdHex = '0x' + chainId.toString(16);
+    const networkKey = getNetworkByChainId(chainIdHex) || 'sepolia';
+    
+    // Check if contract is deployed on this network
+    const contractAddress = getContractAddress(networkKey);
+    if (!contractAddress) {
+      // No contract on this network, use mock behavior
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Generate a random transaction hash
+      const transactionHash = '0x' + Array.from({ length: 64 }, () => 
+        Math.floor(Math.random() * 16).toString(16)
+      ).join('');
+      
+      // Generate a random token ID
+      const tokenId = Math.floor(1000 + Math.random() * 9000);
+      
+      return {
+        transactionHash,
+        tokenId
+      };
+    }
+    
+    // Get contract instance
+    const contract = await getDomainRegistryContract();
+    
+    console.log(`Calculating registration fee for ${name}.${tld} for ${years} years`);
+    
+    // Calculate fee
+    const fee = await contract.calculateRegistrationFee(name, tld, years);
+    
+    console.log('Raw fee from contract:', fee);
+    console.log('Fee type:', typeof fee);
+    
+    // Log the fee value as received from the contract
+    console.log('Fee as received from contract:', fee);
+    
+    // Add some metadata for first-time registration (random data)
+    // This will be used for any token-specific properties
+    console.log('Generating random metadata for domain registration');
+    const metadata = `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
+    
+    // Register domain with the calculated fee
+    // Handle the fee format correctly
+    console.log('Preparing fee for transaction:', fee);
+    console.log('Fee type:', typeof fee);
+    
+    // Make sure fee is passed correctly based on the expected structure
+    let valueToSend = fee;
+    
+    // If fee is an object with a value property, extract that value
+    if (typeof fee === 'object' && fee !== null && 'value' in fee) {
+      valueToSend = fee.value;
+      console.log('Extracted fee.value:', valueToSend);
+    }
+    
+    // Log the final value being sent
+    console.log('Final value for transaction:', valueToSend);
+    
+    // Use the properly formatted fee value
+    const tx = await contract.registerDomain(name, tld, years, { 
+      value: valueToSend 
+    });
+    
+    // Wait for the transaction to be mined
+    const receipt = await tx.wait();
+    
+    // Find the DomainRegistered event
+    const event = receipt.logs.find(
+      (log: any) => log.fragment?.name === 'DomainRegistered'
+    );
+    
+    let tokenId: number = 0;
+    
+    if (event) {
+      // Extract token ID from the event
+      tokenId = event.args[0].toNumber();
+    }
+    
+    return {
+      transactionHash: tx.hash,
+      tokenId
+    };
+  } catch (error: any) {
+    console.error('Error registering domain:', error);
+    throw new Error(`Failed to register domain: ${error.message}`);
+  }
+}
+
+/**
+ * Creates a subdomain for a domain
+ * @param domainTokenId Parent domain token ID
+ * @param subdomain Subdomain name (without parent domain)
+ * @param owner Owner address for the subdomain
+ * @returns Transaction hash
+ */
+export async function createSubdomain(
+  domainTokenId: number,
+  subdomain: string,
+  owner: string
+): Promise<string> {
+  try {
+    // Get the current network's key
+    const provider = getEthersProvider();
+    if (!provider) {
+      // If no provider, use mock behavior
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      
+      // Generate a random transaction hash
+      const transactionHash = '0x' + Array.from({ length: 64 }, () => 
+        Math.floor(Math.random() * 16).toString(16)
+      ).join('');
+      
+      return transactionHash;
+    }
+
+    const { chainId } = await provider.getNetwork();
+    const chainIdHex = '0x' + chainId.toString(16);
+    const networkKey = getNetworkByChainId(chainIdHex) || 'sepolia';
+    
+    // Check if contract is deployed on this network
+    const contractAddress = getContractAddress(networkKey);
+    if (!contractAddress) {
+      // No contract on this network, use mock behavior
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      
+      // Generate a random transaction hash
+      const transactionHash = '0x' + Array.from({ length: 64 }, () => 
+        Math.floor(Math.random() * 16).toString(16)
+      ).join('');
+      
+      return transactionHash;
+    }
+    
+    // Get contract instance
+    const contract = await getDomainRegistryContract();
+    
+    // Create subdomain with metadata
+    const metadata = JSON.stringify({
+      owner,
+      createdAt: new Date().toISOString(),
+    });
+    
+    // Create subdomain
+    const tx = await contract.createSubdomain(domainTokenId, subdomain, metadata);
+    
+    // Wait for the transaction to be mined
+    const receipt = await tx.wait();
+    
+    return tx.hash;
+  } catch (error: any) {
+    console.error('Error creating subdomain:', error);
+    throw new Error(`Failed to create subdomain: ${error.message}`);
+  }
+}
+
+/**
+ * Gets all subdomains for a domain
+ * @param domainTokenId Parent domain token ID
+ * @returns Array of subdomain objects
+ */
+export async function getSubdomains(domainTokenId: number): Promise<any[]> {
+  try {
+    // Get the current network's key
+    const provider = getEthersProvider();
+    if (!provider) {
+      // If no provider, use mock behavior
+      return [];
+    }
+
+    const { chainId } = await provider.getNetwork();
+    const chainIdHex = '0x' + chainId.toString(16);
+    const networkKey = getNetworkByChainId(chainIdHex) || 'sepolia';
+    
+    // Check if contract is deployed on this network
+    const contractAddress = getContractAddress(networkKey);
+    if (!contractAddress) {
+      // No contract on this network, use mock behavior
+      return [];
+    }
+    
+    // Get contract instance
+    const contract = await getDomainRegistryContract();
+    
+    // Get subdomains
+    const subdomains = await contract.getSubdomains(domainTokenId);
+    
+    return subdomains.map((sub: any) => ({
+      name: sub.name,
+      metadata: sub.metadata,
+      parentTokenId: sub.parentTokenId.toNumber(),
+      isActive: sub.isActive
+    }));
+  } catch (error) {
+    console.error('Error getting subdomains:', error);
+    return [];
+  }
+}
+
+/**
+ * Listen for account changes
+ * @param callback Function to call when accounts change
+ */
+export function setupAccountChangeListener(callback: (accounts: string[]) => void): void {
+  if (window.ethereum) {
+    window.ethereum.on('accountsChanged', callback);
+  }
+}
+
+/**
+ * Listen for chain changes
+ * @param callback Function to call when chain changes
+ */
+export function setupChainChangeListener(callback: () => void): void {
+  if (window.ethereum) {
+    window.ethereum.on('chainChanged', callback);
+  }
+}
